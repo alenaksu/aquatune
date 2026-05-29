@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.DS_Store
+
+# Python export tools
+scripts/.venv/
+scripts/LightUNet_170.pth
+scripts/__pycache__/
+scripts/*.pyc
