@@ -9,6 +9,8 @@ export default defineConfig({
 
   build: {
     outDir: 'docs',
+    target: 'esnext',
+    modulePreload: { polyfill: false },
   },
 
   // ORT uses dynamic imports internally — don't pre-bundle it
