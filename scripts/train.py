@@ -63,7 +63,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from LU2Net import LU2Net
 from utility.data import LSUIDataset
-from utility.ptcolor import rgb2lab, rgb2lch
+from loss.LAB import lab_Loss
+from loss.LCH import lch_Loss
 from loss.VGG19_PercepLoss import VGG19_PercepLoss
 import pytorch_ssim
 
@@ -79,17 +80,19 @@ def parse_args():
     )
     p.add_argument("--data-dir", required=True,
                    help="Root dataset directory containing input/ and GT/ folders")
-    p.add_argument("--val-split", type=float, default=0.05,
-                   help="Fraction of training data to use as validation")
-    p.add_argument("--crop-size", type=int, default=256,
-                   help="Random crop size (must be divisible by 4)")
-    p.add_argument("--epochs", type=int, default=300,
+    p.add_argument("--val-split", type=float, default=0.2,
+                   help="Fraction of the dataset to hold out for evaluation")
+    p.add_argument("--image-size", "--crop-size", dest="image_size", type=int, default=256,
+                   help="Square resize dimension for training and evaluation images")
+    p.add_argument("--epochs", type=int, default=150,
                    help="Total training epochs")
     p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--lr", type=float, default=1e-4,
+    p.add_argument("--lr", type=float, default=5e-4,
                    help="Initial learning rate")
-    p.add_argument("--lr-min", type=float, default=1e-6,
-                   help="Minimum LR for cosine schedule")
+    p.add_argument("--lr-step-size", type=int, default=40,
+                   help="Epoch interval for StepLR decay")
+    p.add_argument("--lr-gamma", type=float, default=0.8,
+                   help="Multiplicative LR decay applied every --lr-step-size epochs")
     p.add_argument("--no-vgg", action="store_true",
                    help="Disable VGG19 perceptual loss (faster, less memory)")
     p.add_argument("--resume", default=None,
@@ -161,6 +164,13 @@ def psnr(pred, gt, max_val=1.0):
     return 20 * math.log10(max_val) - 10 * math.log10(mse.item())
 
 
+def to_image_range(tensor, clamp=True):
+    image = (tensor + 1.0) * 0.5
+    if clamp:
+        image = torch.clamp(image, 0.0, 1.0)
+    return image
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -184,16 +194,16 @@ def main():
     # ------------------------------------------------------------------
     # Dataset & DataLoaders
     # ------------------------------------------------------------------
-    assert args.crop_size % 4 == 0, "--crop-size must be divisible by 4"
+    assert args.image_size % 4 == 0, "--image-size must be divisible by 4"
 
-    full_ds = LSUIDataset(args.data_dir, training=True, crop_size=args.crop_size)
+    full_ds = LSUIDataset(args.data_dir, training=True, image_size=args.image_size)
     n_val   = max(1, int(len(full_ds) * args.val_split))
     n_train = len(full_ds) - n_val
     train_ds, val_ds = random_split(full_ds, [n_train, n_val],
                                     generator=torch.Generator().manual_seed(42))
 
-    # Val dataset: no crop/flip — use full images resized to multiple of 4
-    val_ds_full = LSUIDataset(args.data_dir, training=False, crop_size=args.crop_size)
+    # Eval dataset: identical preprocessing without augmentation.
+    val_ds_full = LSUIDataset(args.data_dir, training=False, image_size=args.image_size)
     # Use same indices as the split
     val_ds_full = torch.utils.data.Subset(val_ds_full, val_ds.indices)
 
@@ -203,7 +213,7 @@ def main():
     val_loader   = DataLoader(val_ds_full, batch_size=1, shuffle=False,
                               num_workers=args.workers, pin_memory=pin)
 
-    print(f"[train] {n_train} train / {n_val} val images")
+    print(f"[train] {n_train} train / {n_val} eval images")
 
     # ------------------------------------------------------------------
     # Model
@@ -216,6 +226,8 @@ def main():
     # Losses  (paper Eq. 1: L_total = l_RGB + l_LAB + l_LCH + l_SSIM + l_VGG)
     # ------------------------------------------------------------------
     criterion_ssim = pytorch_ssim.SSIM(window_size=11).to(device)
+    criterion_lab  = lab_Loss().to(device)
+    criterion_lch  = lch_Loss().to(device)
     criterion_percep = None
     if not args.no_vgg:
         try:
@@ -225,12 +237,9 @@ def main():
             print(f"[train] WARNING: Could not load VGG19 ({e}). Perceptual loss disabled.")
 
     # ------------------------------------------------------------------
-    # Optimizer & scheduler
+    # Optimizer
     # ------------------------------------------------------------------
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs, eta_min=args.lr_min
-    )
 
     # ------------------------------------------------------------------
     # Resume
@@ -244,10 +253,36 @@ def main():
         start_epoch, best_psnr = load_checkpoint(
             args.resume, model, optimizer, device=str(device)
         )
-        # Fast-forward the scheduler to match
-        for _ in range(start_epoch):
-            scheduler.step()
         print(f"[train] Resuming from epoch {start_epoch}, best PSNR {best_psnr:.2f} dB")
+
+    # Check if '--lr' was explicitly passed in the command line
+    lr_explicitly_set = any(arg == "--lr" or arg.startswith("--lr=") for arg in sys.argv)
+
+    for group in optimizer.param_groups:
+        if lr_explicitly_set:
+            # We want the post-decay learning rate at start_epoch to be exactly args.lr.
+            # StepLR formula: lr = initial_lr * (gamma ** (last_epoch // step_size))
+            # So: initial_lr = args.lr / (gamma ** (last_epoch // step_size))
+            last_epoch = start_epoch - 1
+            decay_steps = max(0, last_epoch) // args.lr_step_size
+            factor = args.lr_gamma ** decay_steps
+            group["initial_lr"] = args.lr / factor
+            group["lr"] = args.lr
+            print(f"[train] Overriding learning rate to {args.lr} (initial_lr adjusted to {group['initial_lr']:.2e} for epoch {start_epoch})")
+        else:
+            # Keep scheduler base LR stable when resuming from checkpoints that
+            # do not store `initial_lr` in optimizer param groups.
+            group.setdefault("initial_lr", args.lr)
+
+    # ------------------------------------------------------------------
+    # Scheduler
+    # ------------------------------------------------------------------
+    scheduler = optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=args.lr_step_size,
+        gamma=args.lr_gamma,
+        last_epoch=start_epoch - 1,
+    )
 
     writer = SummaryWriter(log_dir=str(run_dir / "tb"))
     print(f"[train] Logs & checkpoints → {run_dir}")
@@ -264,21 +299,22 @@ def main():
             raw = raw.to(device, non_blocking=True)
             gt  = gt.to(device,  non_blocking=True)
 
-            pred = model(raw)
-            pred = torch.clamp(pred, 0.0, 1.0)
+            pred = torch.clamp(model(raw), -1.0, 1.0)
+            pred_img = to_image_range(pred)
+            gt_img = to_image_range(gt)
 
             # l_RGB: MSE in RGB space
-            loss_rgb  = nn.functional.mse_loss(pred, gt)
-            # l_LAB: MSE in LAB space
-            loss_lab  = nn.functional.mse_loss(rgb2lab(pred), rgb2lab(gt))
-            # l_LCH: MSE in LCH space
-            loss_lch  = nn.functional.mse_loss(rgb2lch(pred), rgb2lch(gt))
+            loss_rgb  = nn.functional.mse_loss(pred_img, gt_img)
+            # l_LAB: Custom LAB loss
+            loss_lab  = criterion_lab(pred_img, gt_img)
+            # l_LCH: Custom LCH loss
+            loss_lch  = criterion_lch(pred_img, gt_img)
             # l_SSIM: 1 - SSIM
-            loss_ssim = 1.0 - criterion_ssim(pred, gt)
+            loss_ssim = 1.0 - criterion_ssim(pred_img, gt_img)
             loss = loss_rgb + loss_lab + loss_lch + loss_ssim
 
             if criterion_percep is not None:
-                loss = loss + criterion_percep(pred, gt)
+                loss = loss + criterion_percep(pred_img, gt_img)
 
             optimizer.zero_grad()
             loss.backward()
@@ -313,14 +349,17 @@ def main():
             for i, (raw, gt, _) in enumerate(val_loader):
                 raw = raw.to(device)
                 gt  = gt.to(device)
-                pred = torch.clamp(model(raw), 0.0, 1.0)
-                val_psnr_sum += psnr(pred, gt)
-                val_ssim_sum += criterion_ssim(pred, gt).item()
+                pred = torch.clamp(model(raw), -1.0, 1.0)
+                raw_img = to_image_range(raw)
+                pred_img = to_image_range(pred)
+                gt_img = to_image_range(gt)
+                val_psnr_sum += psnr(pred_img, gt_img)
+                val_ssim_sum += criterion_ssim(pred_img, gt_img).item()
 
                 # Log first 4 val images to TensorBoard
                 if i < 4:
                     grid = vutils.make_grid(
-                        torch.cat([raw, pred, gt], dim=0), nrow=1, normalize=True
+                        torch.cat([raw_img, pred_img, gt_img], dim=0), nrow=1
                     )
                     writer.add_image(f"val/img_{i}_input-pred-gt", grid, epoch)
 

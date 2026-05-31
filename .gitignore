@@ -5,7 +5,7 @@ dist/
 # Python export tools
 scripts/.venv/
 scripts/LightUNet_170.pth
-scripts/__pycache__/
-scripts/*.pyc
+__pycache__/
+*.pyc
 scripts/train-dataset/
 scripts/runs/

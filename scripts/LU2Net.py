@@ -7,7 +7,7 @@ class CALayer(nn.Module):
         # global average pooling: feature --> point
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         # feature channel downscale and upscale --> channel weight
-        reduction = 1
+        reduction = max(1, reduction)
         self.conv_du = nn.Sequential(
                 nn.Conv2d(channel, channel // reduction, 1, padding=0, bias=bias),
                 nn.ReLU(inplace=True),
@@ -43,7 +43,7 @@ class EncoderBlock(nn.Module):
     """Encoding then downsampling"""
     def __init__(self, in_c, out_c, mixer_kernel = (7, 7)):
         super().__init__()
-        self.dw = AxialDW(in_c, mixer_kernel = (7, 7))
+        self.dw = AxialDW(in_c, mixer_kernel=mixer_kernel)
         self.bn = nn.BatchNorm2d(in_c)
         self.pw = nn.Conv2d(in_c, out_c, kernel_size=1)
         self.down = nn.MaxPool2d((2,2))
@@ -61,7 +61,7 @@ class DecoderBlock(nn.Module):
         self.up = nn.Upsample(scale_factor=2)
         self.pw = nn.Conv2d(in_c + out_c, out_c,kernel_size=1)
         self.bn = nn.BatchNorm2d(out_c)
-        self.dw = AxialDW(out_c, mixer_kernel = (7, 7))
+        self.dw = AxialDW(out_c, mixer_kernel=mixer_kernel)
         self.act = nn.GELU()
         self.pw2 = nn.Conv2d(out_c, out_c, kernel_size=1)
 

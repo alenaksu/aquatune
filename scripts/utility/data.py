@@ -17,10 +17,11 @@ class LSUIDataset(data.Dataset):
     Both folders must contain images with matching filenames.
     """
 
-    def __init__(self, data_dir, training=True, crop_size=256):
+    def __init__(self, data_dir, training=True, image_size=256, normalize=True):
         self.input_dir = os.path.join(data_dir, "input")
         self.gt_dir = os.path.join(data_dir, "GT")
-        self.crop_size = crop_size
+        self.image_size = image_size
+        self.normalize = normalize
         self.training = training
 
         exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -29,6 +30,8 @@ class LSUIDataset(data.Dataset):
             if os.path.splitext(f)[1].lower() in exts
         )
         assert len(self.names) > 0, f"No images found in {self.input_dir}"
+        missing_gt = [name for name in self.names if not os.path.exists(os.path.join(self.gt_dir, name))]
+        assert not missing_gt, f"Missing GT files for {len(missing_gt)} inputs; first missing: {missing_gt[0]}"
 
     # ------------------------------------------------------------------
     def __len__(self):
@@ -39,20 +42,10 @@ class LSUIDataset(data.Dataset):
         raw = Image.open(os.path.join(self.input_dir, name)).convert("RGB")
         gt = Image.open(os.path.join(self.gt_dir, name)).convert("RGB")
 
-        # Identical random crop for both images.
-        # If the image is smaller than crop_size, pad it first so get_params
-        # never raises "Required crop size larger than input image size".
-        if self.crop_size is not None:
-            pw = max(0, self.crop_size - raw.width)
-            ph = max(0, self.crop_size - raw.height)
-            if pw > 0 or ph > 0:
-                raw = transforms.functional.pad(raw, (0, 0, pw, ph), padding_mode="reflect")
-                gt  = transforms.functional.pad(gt,  (0, 0, pw, ph), padding_mode="reflect")
-            i, j, h, w = transforms.RandomCrop.get_params(
-                raw, output_size=(self.crop_size, self.crop_size)
-            )
-            raw = transforms.functional.crop(raw, i, j, h, w)
-            gt = transforms.functional.crop(gt, i, j, h, w)
+        if self.image_size is not None:
+            size = [self.image_size, self.image_size]
+            raw = transforms.functional.resize(raw, size, antialias=True)
+            gt = transforms.functional.resize(gt, size, antialias=True)
 
         # Identical random horizontal flip
         if self.training and torch.rand(1).item() > 0.5:
@@ -61,6 +54,9 @@ class LSUIDataset(data.Dataset):
 
         raw = transforms.functional.to_tensor(raw)
         gt = transforms.functional.to_tensor(gt)
+        if self.normalize:
+            raw = raw.mul(2.0).sub(1.0)
+            gt = gt.mul(2.0).sub(1.0)
         return raw, gt, name
 
 

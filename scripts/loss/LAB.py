@@ -28,7 +28,7 @@ class lab_Loss(nn.Module):
         p = self.Hist_2_Dist_AB(img, tab, alpha).to(img.device)
         q = self.Hist_2_Dist_AB(gt, tab, alpha).to(img.device)
         p = torch.clamp(p, 0.001, 0.999)
-        loss = -(q * torch.log(p)).sum([1, 2, 3]).mean()
+        loss = -(q * torch.log(p)).sum(1).mean()
         return loss
 
     def forward(self, img, gt):
