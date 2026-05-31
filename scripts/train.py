@@ -164,13 +164,6 @@ def psnr(pred, gt, max_val=1.0):
     return 20 * math.log10(max_val) - 10 * math.log10(mse.item())
 
 
-def to_image_range(tensor, clamp=True):
-    image = (tensor + 1.0) * 0.5
-    if clamp:
-        image = torch.clamp(image, 0.0, 1.0)
-    return image
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -299,22 +292,20 @@ def main():
             raw = raw.to(device, non_blocking=True)
             gt  = gt.to(device,  non_blocking=True)
 
-            pred = torch.clamp(model(raw), -1.0, 1.0)
-            pred_img = to_image_range(pred)
-            gt_img = to_image_range(gt)
+            pred = torch.clamp(model(raw), 0.0, 1.0)
 
             # l_RGB: MSE in RGB space
-            loss_rgb  = nn.functional.mse_loss(pred_img, gt_img)
+            loss_rgb  = nn.functional.mse_loss(pred, gt)
             # l_LAB: Custom LAB loss
-            loss_lab  = criterion_lab(pred_img, gt_img)
+            loss_lab  = criterion_lab(pred, gt)
             # l_LCH: Custom LCH loss
-            loss_lch  = criterion_lch(pred_img, gt_img)
+            loss_lch  = criterion_lch(pred, gt)
             # l_SSIM: 1 - SSIM
-            loss_ssim = 1.0 - criterion_ssim(pred_img, gt_img)
+            loss_ssim = 1.0 - criterion_ssim(pred, gt)
             loss = loss_rgb + loss_lab + loss_lch + loss_ssim
 
             if criterion_percep is not None:
-                loss = loss + criterion_percep(pred_img, gt_img)
+                loss = loss + criterion_percep(pred, gt)
 
             optimizer.zero_grad()
             loss.backward()
@@ -349,17 +340,14 @@ def main():
             for i, (raw, gt, _) in enumerate(val_loader):
                 raw = raw.to(device)
                 gt  = gt.to(device)
-                pred = torch.clamp(model(raw), -1.0, 1.0)
-                raw_img = to_image_range(raw)
-                pred_img = to_image_range(pred)
-                gt_img = to_image_range(gt)
-                val_psnr_sum += psnr(pred_img, gt_img)
-                val_ssim_sum += criterion_ssim(pred_img, gt_img).item()
+                pred = torch.clamp(model(raw), 0.0, 1.0)
+                val_psnr_sum += psnr(pred, gt)
+                val_ssim_sum += criterion_ssim(pred, gt).item()
 
                 # Log first 4 val images to TensorBoard
                 if i < 4:
                     grid = vutils.make_grid(
-                        torch.cat([raw_img, pred_img, gt_img], dim=0), nrow=1
+                        torch.cat([raw, pred, gt], dim=0), nrow=1
                     )
                     writer.add_image(f"val/img_{i}_input-pred-gt", grid, epoch)
 

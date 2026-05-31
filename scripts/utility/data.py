@@ -17,11 +17,10 @@ class LSUIDataset(data.Dataset):
     Both folders must contain images with matching filenames.
     """
 
-    def __init__(self, data_dir, training=True, image_size=256, normalize=True):
+    def __init__(self, data_dir, training=True, image_size=256):
         self.input_dir = os.path.join(data_dir, "input")
         self.gt_dir = os.path.join(data_dir, "GT")
         self.image_size = image_size
-        self.normalize = normalize
         self.training = training
 
         exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -54,9 +53,6 @@ class LSUIDataset(data.Dataset):
 
         raw = transforms.functional.to_tensor(raw)
         gt = transforms.functional.to_tensor(gt)
-        if self.normalize:
-            raw = raw.mul(2.0).sub(1.0)
-            gt = gt.mul(2.0).sub(1.0)
         return raw, gt, name
 
 
